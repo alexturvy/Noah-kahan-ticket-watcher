@@ -1,0 +1,11 @@
+# Python virtual environment
+venv/
+
+# Saved Ticketmaster login session
+tm_profile/
+
+# Sample of the availability data (saved on first run)
+*.json
+
+# macOS junk
+.DS_Store
