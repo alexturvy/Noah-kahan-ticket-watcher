@@ -42,7 +42,7 @@ notification on a phone:
 2. In the app, **subscribe** to this topic (type it exactly):
 
    ```
-   stinkydevon26
+   dt5118
    ```
 
 That's all. Anyone subscribed to that topic gets the alert.

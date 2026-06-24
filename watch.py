@@ -44,7 +44,7 @@ EVENT_URL = os.environ.get(
 # Phone push (optional). Install the free "ntfy" app, subscribe to this exact
 # topic, and you'll get alerts on your phone too. Leave blank to skip phone push
 # and rely only on the Mac's own notification.
-NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "stinkydevon26")
+NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "dt5118")
 
 # How often to check, in seconds (a little randomness is added so it looks human).
 CHECK_EVERY_SECONDS = int(os.environ.get("CHECK_EVERY_SECONDS", "60"))
