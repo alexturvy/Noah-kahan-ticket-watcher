@@ -139,7 +139,9 @@ def count_available(payload):
     if isinstance(facets, list):
         total = 0
         for facet in facets:
-            if isinstance(facet, dict):
+            # The feed normally only returns available facets, but guard anyway:
+            # skip any facet explicitly marked unavailable.
+            if isinstance(facet, dict) and facet.get("available", True):
                 c = facet.get("count")
                 if isinstance(c, (int, float)):
                     total += int(c)
