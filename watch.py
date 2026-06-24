@@ -244,20 +244,53 @@ def safe_json(response):
         return None
 
 
+def fetch_in_page(page, url):
+    """
+    Ask Ticketmaster for the availability feed from *inside* the page's own
+    JavaScript. This carries the real session/cookies and runs as the genuine
+    page, so it passes bot protection and works even when the page's UI is just
+    showing "sold out" and never redraws the seat map. Returns parsed JSON or None.
+    """
+    try:
+        text = page.evaluate(
+            """async (u) => {
+                try {
+                    const r = await fetch(u, {
+                        credentials: 'include',
+                        headers: {'Accept': 'application/json'},
+                    });
+                    if (!r.ok) return null;
+                    return await r.text();
+                } catch (e) { return null; }
+            }""",
+            url,
+        )
+    except Exception:
+        return None
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        return None
+
+
 def get_payload(page, context, learned):
     """
     Fetch the seat-availability data for one cycle, reliably.
 
     Strategy:
-      1. If we already learned the feed's URL on a previous cycle, ask
-         Ticketmaster for it directly using the browser's logged-in session.
-         This is fast and skips the timing race entirely.
-      2. Otherwise (first cycle, or the direct call failed/expired), load the
-         event page and *wait* for the feed to fire, learning its URL so future
-         cycles can use the fast path above.
+      1. Once we've learned the feed's URL, fetch it from inside the page (most
+         reliable — it's the real page asking, so bot protection lets it through,
+         and it doesn't depend on the UI re-drawing the seat map).
+      2. Backup: ask via the browser's request session directly.
+      3. First time, or if both direct paths fail, load the event page, wait for
+         the feed to fire, and learn its URL for next time.
     """
-    # 1. Direct call via the logged-in browser session.
     if learned["url"]:
+        payload = fetch_in_page(page, learned["url"])
+        if payload is not None:
+            return payload
         try:
             r = context.request.get(
                 learned["url"],
@@ -268,9 +301,9 @@ def get_payload(page, context, learned):
                 if payload is not None:
                     return payload
         except Exception:
-            pass  # fall through to reloading the page
+            pass
 
-    # 2. Load the page and wait for the feed (up to 30s), learning its URL.
+    # (Re)learn the feed URL by loading the page and waiting for the feed.
     try:
         with page.expect_response(is_availability_response, timeout=30000) as resp_info:
             page.goto(EVENT_URL, wait_until="domcontentloaded")
