@@ -26,7 +26,7 @@ import subprocess
 import time
 
 import requests
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
 
 # ---------------------------------------------------------------------------
@@ -228,17 +228,61 @@ def open_ticket_map(page):
 # Main loop
 # ---------------------------------------------------------------------------
 
-def main():
-    state = {"payload": None}
+def is_availability_response(response):
+    """True for the Ticketmaster background feed that carries seat availability."""
+    url = response.url
+    return "services.ticketmaster.com/api/ismds/event/" in url and \
+        any(tag in url for tag in ("facets", "quickpicks", "availability"))
 
-    def on_response(response):
-        url = response.url
-        if "services.ticketmaster.com/api/ismds/event/" in url and \
-                any(tag in url for tag in ("facets", "quickpicks", "availability")):
-            try:
-                state["payload"] = response.json()
-            except Exception:
-                pass
+
+def safe_json(response):
+    try:
+        return response.json()
+    except Exception:
+        return None
+
+
+def get_payload(page, context, learned):
+    """
+    Fetch the seat-availability data for one cycle, reliably.
+
+    Strategy:
+      1. If we already learned the feed's URL on a previous cycle, ask
+         Ticketmaster for it directly using the browser's logged-in session.
+         This is fast and skips the timing race entirely.
+      2. Otherwise (first cycle, or the direct call failed/expired), load the
+         event page and *wait* for the feed to fire, learning its URL so future
+         cycles can use the fast path above.
+    """
+    # 1. Direct call via the logged-in browser session.
+    if learned["url"]:
+        try:
+            r = context.request.get(
+                learned["url"],
+                headers={"Accept": "application/json", "Referer": EVENT_URL},
+            )
+            if r.ok:
+                payload = safe_json(r)
+                if payload is not None:
+                    return payload
+        except Exception:
+            pass  # fall through to reloading the page
+
+    # 2. Load the page and wait for the feed (up to 30s), learning its URL.
+    try:
+        with page.expect_response(is_availability_response, timeout=30000) as resp_info:
+            page.goto(EVENT_URL, wait_until="domcontentloaded")
+            close_cookie_banner(page)
+            open_ticket_map(page)
+        resp = resp_info.value
+        learned["url"] = resp.url
+        return safe_json(resp)
+    except PlaywrightTimeoutError:
+        return None
+
+
+def main():
+    learned = {"url": None}
 
     print("Noah Kahan ticket watcher starting...")
     print(f"Event:  {EVENT_URL}")
@@ -253,22 +297,14 @@ def main():
             viewport={"width": 1400, "height": 900},
         )
         page = browser.new_page()
-        page.on("response", on_response)
 
         prev_available = None
         sample_saved = False
 
         while True:
             stamp = time.strftime("%I:%M:%S %p")
-            state["payload"] = None  # only trust data from this cycle
             try:
-                page.goto(EVENT_URL, wait_until="domcontentloaded")
-                time.sleep(5)              # let background requests fire
-                close_cookie_banner(page)
-                open_ticket_map(page)
-                time.sleep(4)
-
-                payload = state["payload"]
+                payload = get_payload(page, browser, learned)
                 if payload is None:
                     print(f"[{stamp}] No availability data captured this cycle "
                           "(page may still be loading or needs login).")
