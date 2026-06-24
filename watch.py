@@ -167,6 +167,13 @@ def lowest_price(payload):
                 if k in ("currentPrice", "price", "faceValue", "totalPrice") and \
                         isinstance(v, (int, float)) and v > 0:
                     prices.append(float(v))
+                elif k == "listPriceRange" and isinstance(v, list):
+                    # ismds facets carry price as [{"currency","min","max"}].
+                    for rng in v:
+                        if isinstance(rng, dict):
+                            m = rng.get("min")
+                            if isinstance(m, (int, float)) and m > 0:
+                                prices.append(float(m))
                 else:
                     walk(v)
         elif isinstance(node, list):
@@ -231,9 +238,16 @@ def open_ticket_map(page):
 # ---------------------------------------------------------------------------
 
 def is_availability_response(response):
-    """True for the Ticketmaster background feed that carries seat availability."""
+    """True for the Ticketmaster background feed that carries seat availability.
+
+    The feed lives under the path /api/ismds/event/, but Ticketmaster serves it
+    from different hosts depending on the event/market — today it's
+    offeradapter.ticketmaster.com (it used to be services.ticketmaster.com).
+    Match on the path, not a hardcoded host, so a host change can't silently
+    break capture (which looks like "No availability data captured" every cycle).
+    """
     url = response.url
-    return "services.ticketmaster.com/api/ismds/event/" in url and \
+    return "/api/ismds/event/" in url and \
         any(tag in url for tag in ("facets", "quickpicks", "availability"))
 
 
