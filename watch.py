@@ -59,6 +59,10 @@ JITTER_SECONDS = 5
 # is one step; we click the first match that's visible.
 AUTO_ADD_TO_CART = os.environ.get("AUTO_ADD_TO_CART", "1") != "0"
 
+# Grab "all available" up to this many. Ticketmaster enforces its own per-order
+# limit (usually 8) no matter what, so this is just a sane ceiling.
+MAX_TICKETS = int(os.environ.get("MAX_TICKETS", "8"))
+
 FIND_TICKETS_SELECTORS = (
     "button:has-text('Find Tickets')",
     "a:has-text('Find Tickets')",
@@ -413,13 +417,51 @@ def click_first(page, selectors, label, timeout=5000):
     return False
 
 
-def attempt_grab(page):
+def set_quantity(page, n):
     """
-    Best-effort: bring the window forward and drive the page toward holding a
-    seat in the cart, then stop for her to pay. Never raises. The guaranteed win
-    is the logged-in window coming to the front with the seats on screen — the
-    auto-clicking on top of that is a bonus that may or may not clear
-    Ticketmaster's checkout defenses.
+    Best-effort: set Ticketmaster's 'number of tickets' control to n, so we grab
+    all that are available rather than the default (usually 2). If the control
+    isn't found, we just proceed and Ticketmaster picks the default.
+
+    Note: Ticketmaster only offers *valid* quantities (it won't let you leave a
+    single seat stranded), so the actual number may be the nearest legal value.
+    """
+    # Native <select> dropdowns.
+    for sel in ("select#quantity", "select[name='quantity']",
+                "select[aria-label*='uantity']"):
+        try:
+            el = page.locator(sel).first
+            if el.is_visible(timeout=1200):
+                el.select_option(str(n), timeout=2000)
+                print(f"    set quantity to {n}")
+                return True
+        except Exception:
+            pass
+    # Custom dropdown: open it, then pick the exact-number option.
+    for opener in ("[data-bdd*='quantity'] button", "button[aria-label*='uantity']",
+                   "button:has-text('Quantity')"):
+        try:
+            b = page.locator(opener).first
+            if b.is_visible(timeout=1000):
+                b.click(timeout=1500)
+                time.sleep(0.4)
+                opt = page.get_by_role("option", name=str(n), exact=True).first
+                opt.click(timeout=1500)
+                print(f"    set quantity to {n}")
+                return True
+        except Exception:
+            pass
+    print("    couldn't set quantity (using Ticketmaster's default)")
+    return False
+
+
+def attempt_grab(page, want):
+    """
+    Best-effort: bring the window forward and drive the page toward holding
+    `want` seats in the cart, then stop for her to pay. Never raises. The
+    guaranteed win is the logged-in window coming to the front with the seats on
+    screen — the auto-clicking on top of that is a bonus that may or may not
+    clear Ticketmaster's checkout defenses.
     """
     try:
         page.bring_to_front()
@@ -442,13 +484,16 @@ def attempt_grab(page):
     if page_is_blocked(page):
         return "verification page — finish by hand in the window"
 
+    set_quantity(page, want)
+    time.sleep(0.5)
     click_first(page, SEAT_SELECTORS, "a seat")
     time.sleep(1)
     added = click_first(page, ADD_TO_CART_SELECTORS, "Add to Cart")
     time.sleep(1)
     if page_is_blocked(page):
         return "verification at checkout — finish by hand in the window"
-    return "ADDED TO CART — go pay now!" if added else "seats on screen — grab them by hand"
+    return (f"tried to add {want} — go pay now!" if added
+            else "seats on screen — grab them by hand")
 
 
 def launch_browser(p):
@@ -521,7 +566,8 @@ def main():
                         # Notify instantly, THEN try to grab the seat.
                         phone_alert(headline + f" Buy: {EVENT_URL}")
                         loud_alarm(headline)
-                        status = attempt_grab(page)
+                        want = min(count, MAX_TICKETS)
+                        status = attempt_grab(page, want)
                         print(f"  -> {status}")
                         mac_notify("Noah Kahan — " + status, headline)
                         phone_alert(status)
