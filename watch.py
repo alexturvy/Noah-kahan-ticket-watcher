@@ -47,14 +47,56 @@ EVENT_URL = os.environ.get(
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "dt5118")
 
 # How often to check, in seconds (a little randomness is added so it looks human).
-CHECK_EVERY_SECONDS = int(os.environ.get("CHECK_EVERY_SECONDS", "60"))
-JITTER_SECONDS = 15
+CHECK_EVERY_SECONDS = int(os.environ.get("CHECK_EVERY_SECONDS", "15"))
+JITTER_SECONDS = 5
+
+# When seats are found, try to drive the page into the cart to HOLD them, then
+# stop for you to pay. Set AUTO_ADD_TO_CART=0 to only bring the window forward
+# and sound the alarm (no auto-clicking).
+#
+# These selectors are best-effort guesses at Ticketmaster's buy funnel and may
+# need tuning against the live flow (the same way the feed host did). Each tuple
+# is one step; we click the first match that's visible.
+AUTO_ADD_TO_CART = os.environ.get("AUTO_ADD_TO_CART", "1") != "0"
+
+FIND_TICKETS_SELECTORS = (
+    "button:has-text('Find Tickets')",
+    "a:has-text('Find Tickets')",
+    "button:has-text('Get Tickets')",
+    "button:has-text('Buy')",
+)
+# A purchasable seat/offer in the seat map or quick-picks list.
+SEAT_SELECTORS = (
+    "[data-bdd='quick-pick-list-item']",
+    "[data-bdd^='quick-pick']",
+    "li[role='option']",
+    ".quick-picks__list button",
+    "[data-component='seat']",
+)
+ADD_TO_CART_SELECTORS = (
+    "button:has-text('Add to Cart')",
+    "button:has-text('Continue to Checkout')",
+    "button:has-text('Checkout')",
+    "button:has-text('Continue')",
+)
+BLOCK_PHRASES = (
+    "verify you are human",
+    "pardon the interruption",
+    "are you a human",
+    "press and hold",
+    "captcha",
+)
 
 # Where the logged-in browser session is stored (so you only log in once).
 PROFILE_DIR = os.environ.get("PROFILE_DIR", "tm_profile")
 
 # Set HEADLESS=1 only for testing; Ticketmaster needs a visible window to work.
 HEADLESS = os.environ.get("HEADLESS") == "1"
+
+# Which browser to drive. "chrome" uses the real Google Chrome you already have
+# installed (looks like a normal visitor to Ticketmaster). Set BROWSER_CHANNEL=""
+# to fall back to Playwright's built-in browser. Other options: "msedge".
+BROWSER_CHANNEL = os.environ.get("BROWSER_CHANNEL", "chrome")
 
 # On the first successful read we save the raw availability data here so the
 # seat-counting logic can be double-checked against the real thing.
@@ -330,6 +372,108 @@ def get_payload(page, context, learned):
         return None
 
 
+def loud_alarm(headline):
+    """Make sure she notices: banner + repeated spoken voice."""
+    try:
+        subprocess.run(
+            ["osascript", "-e",
+             f'display notification "{headline[:200]}" with title "GO BUY NOW" sound name "Glass"'],
+            check=False,
+        )
+    except Exception:
+        pass
+    for _ in range(3):
+        try:
+            subprocess.run(["say", "-r", "210", "Tickets available! Go buy now!"], check=False)
+        except Exception:
+            break
+
+
+def page_is_blocked(page):
+    """True if Ticketmaster is showing a captcha / verification wall."""
+    try:
+        text = page.locator("body").inner_text(timeout=3000).lower()
+    except Exception:
+        return False
+    return any(p in text for p in BLOCK_PHRASES)
+
+
+def click_first(page, selectors, label, timeout=5000):
+    """Click the first visible match among selectors. Returns True if it clicked."""
+    for sel in selectors:
+        try:
+            loc = page.locator(sel).first
+            loc.wait_for(state="visible", timeout=timeout)
+            loc.click(timeout=2500)
+            print(f"    clicked {label}  ({sel})")
+            return True
+        except Exception:
+            continue
+    print(f"    couldn't find {label}")
+    return False
+
+
+def attempt_grab(page):
+    """
+    Best-effort: bring the window forward and drive the page toward holding a
+    seat in the cart, then stop for her to pay. Never raises. The guaranteed win
+    is the logged-in window coming to the front with the seats on screen — the
+    auto-clicking on top of that is a bonus that may or may not clear
+    Ticketmaster's checkout defenses.
+    """
+    try:
+        page.bring_to_front()
+    except Exception:
+        pass
+    try:
+        page.goto(EVENT_URL, wait_until="domcontentloaded")
+        time.sleep(2)
+        close_cookie_banner(page)
+    except Exception:
+        pass
+
+    if not AUTO_ADD_TO_CART:
+        return "window is up front — grab the seats"
+    if page_is_blocked(page):
+        return "verification page — finish by hand in the window"
+
+    click_first(page, FIND_TICKETS_SELECTORS, "Find Tickets")
+    time.sleep(2)
+    if page_is_blocked(page):
+        return "verification page — finish by hand in the window"
+
+    click_first(page, SEAT_SELECTORS, "a seat")
+    time.sleep(1)
+    added = click_first(page, ADD_TO_CART_SELECTORS, "Add to Cart")
+    time.sleep(1)
+    if page_is_blocked(page):
+        return "verification at checkout — finish by hand in the window"
+    return "ADDED TO CART — go pay now!" if added else "seats on screen — grab them by hand"
+
+
+def launch_browser(p):
+    """
+    Launch a *real* browser, not the bare automation build, and turn off the
+    'I am being automated' fingerprint so Ticketmaster treats it like a normal
+    visitor. Prefers installed Google Chrome; falls back to bundled Chromium.
+    """
+    common = dict(
+        user_data_dir=PROFILE_DIR,
+        headless=HEADLESS,
+        viewport={"width": 1400, "height": 900},
+        args=["--disable-blink-features=AutomationControlled"],
+        ignore_default_args=["--enable-automation"],
+    )
+    if BROWSER_CHANNEL:
+        try:
+            ctx = p.chromium.launch_persistent_context(channel=BROWSER_CHANNEL, **common)
+            print(f"Using your installed {BROWSER_CHANNEL} browser.")
+            return ctx
+        except Exception as e:
+            print(f"Couldn't launch {BROWSER_CHANNEL} ({e}); using built-in browser.")
+    return p.chromium.launch_persistent_context(**common)
+
+
 def main():
     learned = {"url": None}
 
@@ -340,11 +484,7 @@ def main():
     print("then just leave this window and the browser open.\n")
 
     with sync_playwright() as p:
-        browser = p.chromium.launch_persistent_context(
-            user_data_dir=PROFILE_DIR,
-            headless=HEADLESS,
-            viewport={"width": 1400, "height": 900},
-        )
+        browser = launch_browser(p)
         page = browser.new_page()
 
         prev_available = None
@@ -372,7 +512,26 @@ def main():
                     print(f"[{stamp}] Seats available: {count}")
 
                     if count > 0 and (prev_available is None or prev_available == 0):
-                        fire_alert(count, payload)
+                        price = lowest_price(payload)
+                        extra = f" from ${price}" if price is not None else ""
+                        headline = f"{count} Noah Kahan seat(s) available{extra}!"
+                        print("\n" + "=" * 52)
+                        print("  " + headline)
+                        print("=" * 52)
+                        # Notify instantly, THEN try to grab the seat.
+                        phone_alert(headline + f" Buy: {EVENT_URL}")
+                        loud_alarm(headline)
+                        status = attempt_grab(page)
+                        print(f"  -> {status}")
+                        mac_notify("Noah Kahan — " + status, headline)
+                        phone_alert(status)
+                        print("\n>>> Browser is up front. Finish the purchase, then press")
+                        print(">>> Enter here to resume watching (Ctrl-C to quit).")
+                        try:
+                            input()
+                        except (KeyboardInterrupt, EOFError):
+                            print("\nStopped. Bye!")
+                            break
                     prev_available = count
 
             except KeyboardInterrupt:
@@ -382,7 +541,7 @@ def main():
                 print(f"[{stamp}] Hiccup (will keep trying):", e)
 
             delay = CHECK_EVERY_SECONDS + random.randint(-JITTER_SECONDS, JITTER_SECONDS)
-            delay = max(20, delay)
+            delay = max(8, delay)
             print(f"Next check in {delay}s...\n")
             try:
                 time.sleep(delay)
