@@ -49,26 +49,6 @@ That's all. Anyone subscribed to that topic gets the alert.
 
 ---
 
-## When it finds tickets
-
-The moment seats appear, the script:
-
-1. **Brings the browser to the front** and jumps to the event, so the seats are on screen.
-2. **Tries to add them to the cart** to hold them while you finish paying.
-3. **Sounds a loud alarm** and pushes to your phone.
-4. **Pauses and waits.** The Terminal will say *"press Enter to resume watching."*
-   Don't press Enter until you've finished buying (or given up on this batch) —
-   pausing is what stops it from reloading the page out from under your checkout.
-
-If Ticketmaster throws a *"verify you're human"* step, the script stops and leaves
-it for you to finish by hand in the window — it can't click through those.
-
-It drives your real Google **Chrome** (not a stripped-down test browser) and checks
-about every **15 seconds**, to look like a normal visitor and catch fast-moving
-resale seats.
-
----
-
 ## Good to know (the honest version)
 
 - **The Mac has to stay awake and online**, with the Terminal and browser open.
